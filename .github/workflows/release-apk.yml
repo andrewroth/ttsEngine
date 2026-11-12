@@ -1,0 +1,83 @@
+name: Release APK
+
+# Every push to master (and a manual run from the Actions tab) builds a signed
+# release APK and publishes it as a GitHub release, so the newest build is always at
+#   https://github.com/andrewroth/ttsEngine/releases/latest
+# The signing key lives in the repo secrets ANDROID_KEYSTORE_B64 / _PASSWORD /
+# ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD; the same key every time means a new
+# APK installs over the previous one.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # to create the tag and release
+
+concurrency:
+  group: release-apk
+  cancel-in-progress: false
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: setup android sdk
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools"
+
+      - name: setup gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: restore signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "ANDROID_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - name: build release apk
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleRelease
+
+      - name: name the apk
+        id: apk
+        run: |
+          VERSION=$(sed -n 's/.*versionName *= *"\(.*\)".*/\1/p' app/build.gradle.kts | head -1)
+          SHORT=${GITHUB_SHA::7}
+          TAG="v${VERSION}-build${GITHUB_RUN_NUMBER}-${SHORT}"
+          SRC=$(find app/build/outputs/apk/release -name '*.apk' | head -1)
+          test -n "$SRC" || { echo "no apk built"; exit 1; }
+          OUT="ttsEngine-${VERSION}-build${GITHUB_RUN_NUMBER}.apk"
+          cp "$SRC" "$OUT"
+          # fail if the apk somehow came out unsigned
+          APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --print-certs "$OUT" | head -3
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "file=$OUT" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.apk.outputs.tag }}" "${{ steps.apk.outputs.file }}" \
+            --target "$GITHUB_SHA" \
+            --title "ttsEngine ${{ steps.apk.outputs.version }} (build ${GITHUB_RUN_NUMBER})" \
+            --notes "Signed APK built from commit ${GITHUB_SHA::7} by [CI run ${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}). Download the .apk below and open it on the device to install. Note: it uses its own signing key, so it can't update a copy installed from F-Droid or upstream; uninstall that first." \
+            --latest

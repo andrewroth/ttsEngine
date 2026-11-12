@@ -26,8 +26,23 @@ android {
         }
     }
 
+    // CI signs releases with the fork's own key (GitHub secrets); without these env vars
+    // the release build stays unsigned, as upstream ships it.
+    val ciKeystore = System.getenv("ANDROID_KEYSTORE_FILE")
+    signingConfigs {
+        if (ciKeystore != null) {
+            create("ci") {
+                storeFile = file(ciKeystore)
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (ciKeystore != null) signingConfig = signingConfigs.getByName("ci")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
